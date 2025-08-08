@@ -1,0 +1,9 @@
+{
+  "name": "hitorshit-api",
+  "private": true,
+  "type": "module",
+  "version": "1.0.0",
+  "dependencies": {
+    "@uploadcare/upload-client": "^6.17.0"
+  }
+}
