@@ -96,7 +96,7 @@ export default async function handler(req: Request): Promise<Response> {
             content: [
               { type: "text", text: "Проанализируй экран и верни строго JSON." },
               // NB: в Chat Completions тип изображения — "input_image"
-              { type: "input_image", image_url: { url: dataUrl } }
+              { type: "image_url", image_url: { url: dataUrl } }
             ]
           }
         ]
