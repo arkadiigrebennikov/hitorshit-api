@@ -1,16 +1,17 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node';
-import fetch from 'node-fetch';
+// api/analyze.ts
+import type { VercelRequest, VercelResponse } from "@vercel/node";
+import fetch from "node-fetch";
+import FormData from "form-data";
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const UPLOADCARE_PUBLIC_KEY = process.env.UPLOADCARE_PUBLIC_KEY;
-
-// Подгружаем промпт из отдельного файла
-import PROMPT from '../prompt';
+// CORS-хелпер
+function setCors(res: VercelResponse) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-File-Name");
+}
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  setCors(res);
 
   if (req.method === "OPTIONS") {
     return res.status(200).end();
@@ -20,59 +21,65 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
+  const { imageBase64 } = req.body;
+  if (!imageBase64) {
+    return res.status(400).json({ error: "No image provided" });
+  }
+
   try {
-    const { imageUrl } = req.body;
-    if (!imageUrl) {
-      return res.status(400).json({ error: "No image URL provided" });
+    // 1. Загрузка в Uploadcare
+    const uploadcareUrl = "https://upload.uploadcare.com/base64/";
+    const form = new FormData();
+    form.append("UPLOADCARE_PUB_KEY", process.env.UPLOADCARE_PUBLIC_KEY || "");
+    form.append("UPLOADCARE_STORE", "1");
+    form.append("file", imageBase64);
+
+    const uploadResp = await fetch(uploadcareUrl, {
+      method: "POST",
+      body: form as any
+    });
+
+    const uploadData = await uploadResp.json();
+    if (!uploadData || !uploadData.file) {
+      throw new Error("Uploadcare upload failed");
     }
 
-    const format = req.query.format || "text"; // text по умолчанию
+    const imageUrl = `https://ucarecdn.com/${uploadData.file}/`;
 
-    // Превращаем Uploadcare URL в прямой
-    const dataUrl = imageUrl;
+    // 2. Запрос в OpenAI GPT-4o
+    const prompt = `
+Ты — опытный UX/UI дизайнер. 
+Проанализируй макет по изображению: ${imageUrl}
+Дай разбор на русском языке с выделенными заголовками, подзаголовками и абзацами. 
+Без JSON, только чистый текст с Markdown.
+    `;
 
-    const messages: any[] = [
-      {
-        role: "system",
-        content: format === "json"
-          ? `Ты опытный UX/UI дизайнер. Анализируй дизайн по критериям: UX, UI, типографика, композиция, цвет/контраст, доступность. 
-             Верни результат строго в JSON с полями: summary, scores (по 10-балльной), issues (массив), quick_fixes, final_verdict.`
-          : PROMPT // длинный промпт для текстового отчёта
-      },
-      {
-        role: "user",
-        content: [
-          { type: "text", text: format === "json" ? "Проанализируй макет и верни JSON." : "Проанализируй макет и верни красиво оформленный отчёт на русском языке." },
-          { type: "image_url", image_url: { url: dataUrl } }
-        ]
-      }
-    ];
-
-    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
       },
       body: JSON.stringify({
-        model: "gpt-4o",
-        messages,
-        ...(format === "json"
-          ? { response_format: { type: "json_schema", json_schema: { name: "DesignReview", schema: { type: "object", additionalProperties: false, properties: { summary: { type: "string" }, scores: { type: "object", additionalProperties: { type: "integer" } }, issues: { type: "array", items: { type: "object", properties: { area: { type: "string" }, severity: { type: "string" }, what: { type: "string" }, why: { type: "string" }, fix: { type: "string" } }, additionalProperties: false } }, quick_fixes: { type: "array", items: { type: "string" } }, final_verdict: { type: "string" } }, required: ["summary", "scores", "issues", "quick_fixes", "final_verdict"] } } }
-          : {})
+        model: "gpt-4o-mini",
+        messages: [
+          { role: "system", content: "Ты эксперт по дизайну." },
+          { role: "user", content: prompt }
+        ]
       })
     });
 
-    const data = await openaiRes.json();
-
-    if (format === "json") {
-      return res.status(200).json(data.choices[0].message.content);
-    } else {
-      return res.status(200).send(data.choices[0].message.content);
+    const aiData = await aiResp.json();
+    if (!aiData.choices?.[0]?.message?.content) {
+      throw new Error("OpenAI response error");
     }
 
+    res.status(200).json({
+      analysis: aiData.choices[0].message.content.trim()
+    });
+
   } catch (err: any) {
-    console.error(err);
-    return res.status(502).json({ error: err.message || "Unknown error" });
+    console.error("Analyze error:", err);
+    res.status(500).json({ error: String(err) });
   }
 }
