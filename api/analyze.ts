@@ -1,40 +1,55 @@
-// Vercel Functions (Framework: Other) — Edge runtime
 export const config = { runtime: 'edge' };
 
-// CORS
-const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-File-Name",
-  "Access-Control-Max-Age": "86400"
-};
+// универсальный конструктор CORS-ответов
+function corsHeaders(req: Request, extra: Record<string, string> = {}) {
+  const acrh = req.headers.get("access-control-request-headers");
+  const methods = req.headers.get("access-control-request-method");
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": methods || "POST, OPTIONS",
+    "Access-Control-Allow-Headers": acrh || "Content-Type",
+    "Access-Control-Max-Age": "86400",
+    ...extra
+  };
+}
 
-// Безопасно достаём ключ без типов Node/TS:
+function j(req: Request, body: any, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...corsHeaders(req) }
+  });
+}
+
+// безопасно достаём ключ (без типов Node)
 const OPENAI_API_KEY =
   (globalThis as any)?.process?.env?.OPENAI_API_KEY ||
   (globalThis as any)?.OPENAI_API_KEY ||
   "";
 
-function j(body: any, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json", ...CORS }
-  });
-}
-
 export default async function handler(req: Request): Promise<Response> {
-  // Preflight for CORS
-  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
-  if (req.method !== "POST")   return new Response("Method Not Allowed", { status: 405, headers: CORS });
+  const url = new URL(req.url);
 
-  if (!OPENAI_API_KEY) return j({ error: "Missing OPENAI_API_KEY" }, 500);
+  // CORS preflight
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders(req) });
+  }
+
+  // маршрут
+  if (url.pathname !== "/api/analyze") {
+    return new Response("Not found", { status: 404, headers: corsHeaders(req) });
+  }
+  if (req.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders(req) });
+  }
+
+  if (!OPENAI_API_KEY) return j(req, { error: "Missing OPENAI_API_KEY" }, 500);
 
   try {
-    // 1) читаем PNG-байты из Фигмы
+    // читаем PNG-байты
     const bytes = new Uint8Array(await req.arrayBuffer());
-    if (!bytes.byteLength) return j({ error: "Empty body" }, 400);
+    if (!bytes.byteLength) return j(req, { error: "Empty body" }, 400);
 
-    // 2) конверт в data: URL (без Uploadcare)
+    // конвертим в data URL (порционно)
     let bin = "";
     const CHUNK = 0x8000;
     for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -42,7 +57,7 @@ export default async function handler(req: Request): Promise<Response> {
     }
     const dataUrl = `data:image/png;base64,${btoa(bin)}`;
 
-    // 3) промпт + схема
+    // промпт + JSON-схема
     const PROMPT = `
 Ты строгий, но конструктивный дизайн-критик.
 Оцени экран по пунктам:
@@ -79,7 +94,7 @@ export default async function handler(req: Request): Promise<Response> {
       required:["summary","scores","issues","quick_fixes","final_verdict"]
     };
 
-    // 4) запрос к OpenAI (REST)
+    // запрос к OpenAI (правильный тип изображения — image_url)
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -95,7 +110,6 @@ export default async function handler(req: Request): Promise<Response> {
             role: "user",
             content: [
               { type: "text", text: "Проанализируй экран и верни строго JSON." },
-              // NB: в Chat Completions тип изображения — "input_image"
               { type: "image_url", image_url: { url: dataUrl } }
             ]
           }
@@ -105,7 +119,7 @@ export default async function handler(req: Request): Promise<Response> {
 
     if (!r.ok) {
       const txt = await r.text();
-      return j({ error: `OpenAI ${r.status}`, details: txt }, 502);
+      return j(req, { error: `OpenAI ${r.status}`, details: txt }, 502);
     }
 
     const jresp = await r.json();
@@ -113,11 +127,14 @@ export default async function handler(req: Request): Promise<Response> {
 
     try {
       const parsed = JSON.parse(content);
-      return j(parsed, 200);
+      return new Response(JSON.stringify(parsed), {
+        status: 200,
+        headers: { "Content-Type": "application/json", ...corsHeaders(req) }
+      });
     } catch {
-      return j({ error: "Model returned non-JSON", content }, 502);
+      return j(req, { error: "Model returned non-JSON", content }, 502);
     }
   } catch (e: any) {
-    return j({ error: e?.message || String(e) }, 500);
+    return j(req, { error: e?.message || String(e) }, 500);
   }
 }
