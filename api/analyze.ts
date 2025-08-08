@@ -1,12 +1,19 @@
-// Vercel Functions (Other) — Edge runtime
+// Vercel Functions (Framework: Other) — Edge runtime
 export const config = { runtime: 'edge' };
 
+// CORS
 const CORS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-File-Name",
   "Access-Control-Max-Age": "86400"
 };
+
+// Безопасно достаём ключ без типов Node/TS:
+const OPENAI_API_KEY =
+  (globalThis as any)?.process?.env?.OPENAI_API_KEY ||
+  (globalThis as any)?.OPENAI_API_KEY ||
+  "";
 
 function j(body: any, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -16,25 +23,23 @@ function j(body: any, status = 200) {
 }
 
 export default async function handler(req: Request): Promise<Response> {
+  // Preflight for CORS
   if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
   if (req.method !== "POST")   return new Response("Method Not Allowed", { status: 405, headers: CORS });
 
-  if (!process.env.OPENAI_API_KEY) {
-    return j({ error: "Missing OPENAI_API_KEY" }, 500);
-  }
+  if (!OPENAI_API_KEY) return j({ error: "Missing OPENAI_API_KEY" }, 500);
 
   try {
     // 1) читаем PNG-байты из Фигмы
     const bytes = new Uint8Array(await req.arrayBuffer());
     if (!bytes.byteLength) return j({ error: "Empty body" }, 400);
 
-    // 2) конвертим в data: URL (без Uploadcare)
+    // 2) конверт в data: URL (без Uploadcare)
     let bin = "";
     const CHUNK = 0x8000;
     for (let i = 0; i < bytes.length; i += CHUNK) {
       bin += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + CHUNK)));
     }
-    // btoa доступен в Edge runtime
     const dataUrl = `data:image/png;base64,${btoa(bin)}`;
 
     // 3) промпт + схема
@@ -78,7 +83,7 @@ export default async function handler(req: Request): Promise<Response> {
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -90,7 +95,7 @@ export default async function handler(req: Request): Promise<Response> {
             role: "user",
             content: [
               { type: "text", text: "Проанализируй экран и верни строго JSON." },
-              // В Chat Completions тип изображения — input_image
+              // NB: в Chat Completions тип изображения — "input_image"
               { type: "input_image", image_url: { url: dataUrl } }
             ]
           }
