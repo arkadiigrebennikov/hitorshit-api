@@ -1,85 +1,145 @@
-// api/analyze.ts
+// Vercel Serverless Function (Node) — CORS + imageBase64 -> OpenAI
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import fetch from "node-fetch";
-import FormData from "form-data";
 
-// CORS-хелпер
-function setCors(res: VercelResponse) {
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+
+function setCORS(res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-File-Name");
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  setCors(res);
+  setCORS(res);
 
-  if (req.method === "OPTIONS") {
-    return res.status(200).end();
-  }
-
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
-
-  const { imageBase64 } = req.body;
-  if (!imageBase64) {
-    return res.status(400).json({ error: "No image provided" });
-  }
+  if (req.method === "OPTIONS") return res.status(200).end();
+  if (req.method !== "POST") return res.status(405).json({ error: "Method Not Allowed" });
+  if (!OPENAI_API_KEY) return res.status(500).json({ error: "Missing OPENAI_API_KEY" });
 
   try {
-    // 1. Загрузка в Uploadcare
-    const uploadcareUrl = "https://upload.uploadcare.com/base64/";
-    const form = new FormData();
-    form.append("UPLOADCARE_PUB_KEY", process.env.UPLOADCARE_PUBLIC_KEY || "");
-    form.append("UPLOADCARE_STORE", "1");
-    form.append("file", imageBase64);
-
-    const uploadResp = await fetch(uploadcareUrl, {
-      method: "POST",
-      body: form as any
-    });
-
-    const uploadData = await uploadResp.json();
-    if (!uploadData || !uploadData.file) {
-      throw new Error("Uploadcare upload failed");
+    // плагин присылает { imageBase64: "<...>" } БЕЗ префикса data:
+    if (!req.body || typeof req.body.imageBase64 !== "string") {
+      return res.status(400).json({ error: "Body must be JSON with { imageBase64: <base64> }" });
     }
 
-    const imageUrl = `https://ucarecdn.com/${uploadData.file}/`;
+    const imageBase64 = req.body.imageBase64;
+    const dataUrl = `data:image/png;base64,${imageBase64}`;
 
-    // 2. Запрос в OpenAI GPT-4o
-    const prompt = `
-Ты — опытный UX/UI дизайнер. 
-Проанализируй макет по изображению: ${imageUrl}
-Дай разбор на русском языке с выделенными заголовками, подзаголовками и абзацами. 
-Без JSON, только чистый текст с Markdown.
-    `;
+    const format = (req.query?.format === "json") ? "json" : "text";
 
-    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+    const PROMPT_TEXT =
+`Ты опытный UX/UI дизайнер.
+Проанализируй предоставленный скриншот макета.
+Отвечай на русском.
+Если формат=текст — выдай красиво оформленный отчёт (Markdown: заголовки, списки, абзацы), без JSON.
+Если формат=json — верни строго JSON со структурами:
+{
+  "summary": string,
+  "scores": { "ux":0-10, "ui":0-10, "typography":0-10, "composition":0-10, "color_contrast":0-10, "accessibility":0-10, "hierarchy":0-10, "spacing_grid":0-10, "tap_targets":0-10, "states":0-10 },
+  "issues":[{ "area":string,"severity":string,"what":string,"why":string,"fix":string }],
+  "quick_fixes": string[],
+  "final_verdict": string
+}`;
+
+    // собираем запрос к OpenAI
+    const body: any = {
+      model: "gpt-4o",
+      messages: [
+        { role: "system", content: PROMPT_TEXT },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: format === "json" ? "Верни строго JSON." : "Верни красиво оформленный отчёт (Markdown)." },
+            { type: "image_url", image_url: { url: dataUrl } }
+          ]
+        }
+      ]
+    };
+
+    if (format === "json") {
+      // Жёсткая схема, как требовал OpenAI: additionalProperties:false
+      body.response_format = {
+        type: "json_schema",
+        json_schema: {
+          name: "DesignReview",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              summary: { type: "string" },
+              scores: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  ux: { type: "number", minimum: 0, maximum: 10 },
+                  ui: { type: "number", minimum: 0, maximum: 10 },
+                  typography: { type: "number", minimum: 0, maximum: 10 },
+                  composition: { type: "number", minimum: 0, maximum: 10 },
+                  color_contrast: { type: "number", minimum: 0, maximum: 10 },
+                  accessibility: { type: "number", minimum: 0, maximum: 10 },
+                  hierarchy: { type: "number", minimum: 0, maximum: 10 },
+                  spacing_grid: { type: "number", minimum: 0, maximum: 10 },
+                  tap_targets: { type: "number", minimum: 0, maximum: 10 },
+                  states: { type: "number", minimum: 0, maximum: 10 }
+                },
+                required: ["ux","ui","typography","composition","color_contrast","accessibility","hierarchy","spacing_grid","tap_targets","states"]
+              },
+              issues: {
+                type: "array",
+                items: {
+                  type: "object",
+                  additionalProperties: false,
+                  properties: {
+                    area: { type: "string" },
+                    severity: { type: "string" },
+                    what: { type: "string" },
+                    why: { type: "string" },
+                    fix: { type: "string" }
+                  },
+                  required: ["area","severity","what","why","fix"]
+                }
+              },
+              quick_fixes: { type: "array", items: { type: "string" } },
+              final_verdict: { type: "string" }
+            },
+            required: ["summary","scores","issues","quick_fixes","final_verdict"]
+          },
+          strict: true
+        }
+      };
+    }
+
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "Ты эксперт по дизайну." },
-          { role: "user", content: prompt }
-        ]
-      })
+      body: JSON.stringify(body)
     });
 
-    const aiData = await aiResp.json();
-    if (!aiData.choices?.[0]?.message?.content) {
-      throw new Error("OpenAI response error");
+    if (!r.ok) {
+      const errText = await r.text().catch(() => "");
+      return res.status(502).json({ error: `OpenAI ${r.status}`, details: errText.slice(0, 8000) });
     }
 
-    res.status(200).json({
-      analysis: aiData.choices[0].message.content.trim()
-    });
+    const j = await r.json();
+    const content = j?.choices?.[0]?.message?.content || "";
 
-  } catch (err: any) {
-    console.error("Analyze error:", err);
-    res.status(500).json({ error: String(err) });
+    if (format === "json") {
+      // content — это строка JSON, вернём как объект если получится
+      try {
+        const parsed = JSON.parse(content);
+        return res.status(200).json(parsed);
+      } catch {
+        return res.status(502).json({ error: "Model returned non-JSON", content });
+      }
+    } else {
+      // Текстовый отчёт (Markdown/текст)
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send(content);
+    }
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message || String(e) });
   }
 }
