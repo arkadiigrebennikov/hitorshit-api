@@ -107,26 +107,35 @@ export default async function handler(req: Request): Promise<Response> {
     };
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
+  method: "POST",
+  headers: {
+    "Authorization": `Bearer ${OPENAI_API_KEY}`,
+    "Content-Type": "application/json"
+  },
+  body: JSON.stringify({
+    model: "gpt-4o",
+    messages: [
+      {
+        role: "system",
+        content: `
+Ты опытный UX/UI дизайнер. 
+Анализируй предоставленный скриншот макета и давай оценку по пунктам: UX, UI, типографика, композиция, цвета/контраст, доступность, и т.д.
+Отвечай на русском языке.
+Выводи результат в читаемом виде с заголовками, подзаголовками, абзацами и маркированными списками.
+Не используй JSON и фигурные скобки, пиши как для отчёта клиенту.
+`
       },
-      body: JSON.stringify({
-        model: "gpt-4o",
-        response_format: { type: "json_schema", json_schema: { name: "DesignReview", schema, strict: true } },
-        messages: [
-          { role: "system", content: PROMPT },
-          {
-            role: "user",
-            content: [
-              { type: "text", text: "Проанализируй экран и верни строго JSON." },
-              { type: "image_url", image_url: { url: dataUrl } }
-            ]
-          }
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Проанализируй этот экран." },
+          { type: "image_url", image_url: { url: dataUrl } }
         ]
-      })
-    });
+      }
+    ]
+  })
+});
+
 
     if (!r.ok) {
       const txt = await r.text();
