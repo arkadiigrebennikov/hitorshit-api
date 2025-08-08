@@ -1,26 +1,25 @@
 export const config = { runtime: 'edge' };
 
-// универсальный конструктор CORS-ответов
+// динамические CORS для прохождения любого preflight
 function corsHeaders(req: Request, extra: Record<string, string> = {}) {
   const acrh = req.headers.get("access-control-request-headers");
-  const methods = req.headers.get("access-control-request-method");
+  const acrm = req.headers.get("access-control-request-method");
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": methods || "POST, OPTIONS",
-    "Access-Control-Allow-Headers": acrh || "Content-Type",
+    "Access-Control-Allow-Methods": acrm || "POST, OPTIONS",
+    "Access-Control-Allow-Headers": acrh || "Content-Type, X-File-Name",
     "Access-Control-Max-Age": "86400",
     ...extra
   };
 }
-
-function j(req: Request, body: any, status = 200) {
+function json(req: Request, body: any, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json", ...corsHeaders(req) }
   });
 }
 
-// безопасно достаём ключ (без типов Node)
+// безопасный доступ к ключу без типов Node
 const OPENAI_API_KEY =
   (globalThis as any)?.process?.env?.OPENAI_API_KEY ||
   (globalThis as any)?.OPENAI_API_KEY ||
@@ -29,27 +28,16 @@ const OPENAI_API_KEY =
 export default async function handler(req: Request): Promise<Response> {
   const url = new URL(req.url);
 
-  // CORS preflight
-  if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders(req) });
-  }
-
-  // маршрут
-  if (url.pathname !== "/api/analyze") {
-    return new Response("Not found", { status: 404, headers: corsHeaders(req) });
-  }
-  if (req.method !== "POST") {
-    return new Response("Method Not Allowed", { status: 405, headers: corsHeaders(req) });
-  }
-
-  if (!OPENAI_API_KEY) return j(req, { error: "Missing OPENAI_API_KEY" }, 500);
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: corsHeaders(req) });
+  if (url.pathname !== "/api/analyze") return new Response("Not found", { status: 404, headers: corsHeaders(req) });
+  if (req.method !== "POST") return new Response("Method Not Allowed", { status: 405, headers: corsHeaders(req) });
+  if (!OPENAI_API_KEY) return json(req, { error: "Missing OPENAI_API_KEY" }, 500);
 
   try {
-    // читаем PNG-байты
     const bytes = new Uint8Array(await req.arrayBuffer());
-    if (!bytes.byteLength) return j(req, { error: "Empty body" }, 400);
+    if (!bytes.byteLength) return json(req, { error: "Empty body" }, 400);
 
-    // конвертим в data URL (порционно)
+    // bytes -> data:image/png;base64
     let bin = "";
     const CHUNK = 0x8000;
     for (let i = 0; i < bytes.length; i += CHUNK) {
@@ -57,7 +45,6 @@ export default async function handler(req: Request): Promise<Response> {
     }
     const dataUrl = `data:image/png;base64,${btoa(bin)}`;
 
-    // промпт + JSON-схема
     const PROMPT = `
 Ты строгий, но конструктивный дизайн-критик.
 Оцени экран по пунктам:
@@ -75,26 +62,50 @@ export default async function handler(req: Request): Promise<Response> {
 Дай оценки 0–10 и конкретные правки. Ответ строго JSON по схеме.
 `.trim();
 
+    // ВАЖНО: additionalProperties: false на всех object
     const schema = {
       type: "object",
+      additionalProperties: false,
       properties: {
         summary: { type: "string" },
-        scores: { type: "object", properties: {
-          ux:{type:"number"}, ui:{type:"number"}, typography:{type:"number"},
-          composition:{type:"number"}, color_contrast:{type:"number"},
-          accessibility:{type:"number"}, hierarchy:{type:"number"},
-          spacing_grid:{type:"number"}, tap_targets:{type:"number"}, states:{type:"number"}
-        }, required:["ux","ui","typography","composition","color_contrast","accessibility","hierarchy","spacing_grid","tap_targets","states"]},
-        issues: { type:"array", items:{ type:"object", properties:{
-          area:{type:"string"}, severity:{type:"string"}, what:{type:"string"}, why:{type:"string"}, fix:{type:"string"}
-        }, required:["area","severity","what","why","fix"]}},
-        quick_fixes:{ type:"array", items:{ type:"string" } },
-        final_verdict:{ type:"string" }
+        scores: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            ux: { type: "number", minimum: 0, maximum: 10 },
+            ui: { type: "number", minimum: 0, maximum: 10 },
+            typography: { type: "number", minimum: 0, maximum: 10 },
+            composition: { type: "number", minimum: 0, maximum: 10 },
+            color_contrast: { type: "number", minimum: 0, maximum: 10 },
+            accessibility: { type: "number", minimum: 0, maximum: 10 },
+            hierarchy: { type: "number", minimum: 0, maximum: 10 },
+            spacing_grid: { type: "number", minimum: 0, maximum: 10 },
+            tap_targets: { type: "number", minimum: 0, maximum: 10 },
+            states: { type: "number", minimum: 0, maximum: 10 }
+          },
+          required: ["ux","ui","typography","composition","color_contrast","accessibility","hierarchy","spacing_grid","tap_targets","states"]
+        },
+        issues: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              area: { type: "string" },
+              severity: { type: "string" },
+              what: { type: "string" },
+              why: { type: "string" },
+              fix: { type: "string" }
+            },
+            required: ["area","severity","what","why","fix"]
+          }
+        },
+        quick_fixes: { type: "array", items: { type: "string" } },
+        final_verdict: { type: "string" }
       },
-      required:["summary","scores","issues","quick_fixes","final_verdict"]
+      required: ["summary","scores","issues","quick_fixes","final_verdict"]
     };
 
-    // запрос к OpenAI (правильный тип изображения — image_url)
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -119,12 +130,13 @@ export default async function handler(req: Request): Promise<Response> {
 
     if (!r.ok) {
       const txt = await r.text();
-      return j(req, { error: `OpenAI ${r.status}`, details: txt }, 502);
+      return json(req, { error: `OpenAI ${r.status}`, details: txt }, 502);
     }
 
     const jresp = await r.json();
     const content = jresp?.choices?.[0]?.message?.content || "{}";
 
+    // Контент уже должен быть валидным JSON по схеме
     try {
       const parsed = JSON.parse(content);
       return new Response(JSON.stringify(parsed), {
@@ -132,9 +144,9 @@ export default async function handler(req: Request): Promise<Response> {
         headers: { "Content-Type": "application/json", ...corsHeaders(req) }
       });
     } catch {
-      return j(req, { error: "Model returned non-JSON", content }, 502);
+      return json(req, { error: "Model returned non-JSON", content }, 502);
     }
   } catch (e: any) {
-    return j(req, { error: e?.message || String(e) }, 500);
+    return json(req, { error: e?.message || String(e) }, 500);
   }
 }
