@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/analyze.ts": {
+      "maxDuration": 60
+    }
+  },
+  "env": {
+    "UPLOADCARE_PUBLIC_KEY": "@uploadcare_public_key",
+    "OPENAI_API_KEY": "@openai_api_key"
+  }
+} 
