@@ -131,4 +131,31 @@ export default async function handler(req: Request): Promise<Response> {
       ]
     };
 
-    const r = await fetch("https://api.openai.com/v1/ch
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(openaiBody)
+    });
+
+    if (!r.ok) {
+      const txt = await r.text();
+      return json({ error: `OpenAI ${r.status}`, details: txt }, 502);
+    }
+
+    const j = await r.json();
+    const content = j?.choices?.[0]?.message?.content || "{}";
+
+    try {
+      const parsed = JSON.parse(content);
+      return json(parsed, 200);
+    } catch (_) {
+      return json({ error: "Model returned non-JSON", content }, 502);
+    }
+  } catch (err: any) {
+    console.error("API Error:", err);
+    return json({ error: err?.message || String(err) }, 500);
+  }
+}
