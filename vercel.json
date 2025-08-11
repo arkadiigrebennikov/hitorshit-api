@@ -5,7 +5,7 @@
     }
   },
   "env": {
-    "UPLOADCARE_PUBLIC_KEY": "@uploadcare_public_key",
-    "OPENAI_API_KEY": "@openai_api_key"
+    "UPLOADCARE_PUBLIC_KEY": "92b248a8cf55b00c2dff",
+    "OPENAI_API_KEY": "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"
   }
 } 
